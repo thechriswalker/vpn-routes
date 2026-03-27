@@ -42,10 +42,6 @@
     <key>KeepAlive</key>
     <true/>
 
-    <!-- Route changes require root -->
-    <key>UserName</key>
-    <string>root</string>
-
     <key>StandardOutPath</key>
     <string>/tmp/vpn-routes.out.log</string>
     <key>StandardErrorPath</key>
