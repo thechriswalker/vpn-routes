@@ -36,23 +36,28 @@ func (r *Runner) EnsureHostRoute(ctx context.Context, dev string, ip net.IP) err
 		return fmt.Errorf("not an ipv4 address: %v", ip)
 	}
 
-	ok, err := r.hostRouteUsesDev(ctx, ip4.String(), dev)
+	gw, err := r.bestGatewayForDev(ctx, dev)
+	if err != nil {
+		return err
+	}
+
+	ok, err := r.hostRouteUsesDevAndGateway(ctx, ip4.String(), dev, gw.String())
 	if err == nil && ok {
 		return nil
 	}
 
 	if r.dryRun {
-		r.printf("dry-run: %s -n %s -n add -host %s -interface %s", sudoPath, routePath, ip4.String(), dev)
+		r.printf("dry-run: %s -n %s -n add -host %s %s", sudoPath, routePath, ip4.String(), gw.String())
 		return nil
 	}
 
 	// Best-effort add; ignore “already exists”.
-	out, runErr := r.run(ctx, "-n", "add", "-host", ip4.String(), "-interface", dev)
+	out, runErr := r.run(ctx, "-n", "add", "-host", ip4.String(), gw.String())
 	if runErr != nil {
 		if isAlreadyExists(out) {
 			return nil
 		}
-		return fmt.Errorf("route add host %s via %s: %w (out=%q)", ip4.String(), dev, runErr, out)
+		return fmt.Errorf("route add host %s via %s (%s): %w (out=%q)", ip4.String(), dev, gw.String(), runErr, out)
 	}
 	return nil
 }
@@ -62,22 +67,27 @@ func (r *Runner) EnsureNetRoute(ctx context.Context, dev string, ipnet net.IPNet
 		return fmt.Errorf("not an ipv4 network: %s", ipnet.String())
 	}
 
-	ok, err := r.netRouteUsesDev(ctx, ipnet.String(), dev)
+	gw, err := r.bestGatewayForDev(ctx, dev)
+	if err != nil {
+		return err
+	}
+
+	ok, err := r.netRouteUsesDevAndGateway(ctx, ipnet.String(), dev, gw.String())
 	if err == nil && ok {
 		return nil
 	}
 
 	if r.dryRun {
-		r.printf("dry-run: %s -n %s -n add -net %s -interface %s", sudoPath, routePath, ipnet.String(), dev)
+		r.printf("dry-run: %s -n %s -n add -net %s %s", sudoPath, routePath, ipnet.String(), gw.String())
 		return nil
 	}
 
-	out, runErr := r.run(ctx, "-n", "add", "-net", ipnet.String(), "-interface", dev)
+	out, runErr := r.run(ctx, "-n", "add", "-net", ipnet.String(), gw.String())
 	if runErr != nil {
 		if isAlreadyExists(out) {
 			return nil
 		}
-		return fmt.Errorf("route add net %s via %s: %w (out=%q)", ipnet.String(), dev, runErr, out)
+		return fmt.Errorf("route add net %s via %s (%s): %w (out=%q)", ipnet.String(), dev, gw.String(), runErr, out)
 	}
 	return nil
 }
@@ -152,12 +162,116 @@ func (r *Runner) netRouteUsesDev(ctx context.Context, cidr string, dev string) (
 	return parseInterface(out) == dev, nil
 }
 
+func (r *Runner) hostRouteUsesDevAndGateway(ctx context.Context, ip string, dev string, gw string) (bool, error) {
+	out, err := r.run(ctx, "-n", "get", ip)
+	if err != nil {
+		return false, err
+	}
+	return parseInterface(out) == dev && parseGateway(out) == gw, nil
+}
+
+func (r *Runner) netRouteUsesDevAndGateway(ctx context.Context, cidr string, dev string, gw string) (bool, error) {
+	out, err := r.run(ctx, "-n", "get", "-net", cidr)
+	if err != nil {
+		return false, err
+	}
+	return parseInterface(out) == dev && parseGateway(out) == gw, nil
+}
+
 func (r *Runner) HostRouteUsesDev(ctx context.Context, ip string, dev string) (bool, error) {
-	return r.hostRouteUsesDev(ctx, ip, dev)
+	gw, err := r.bestGatewayForDev(ctx, dev)
+	if err != nil {
+		return false, err
+	}
+	return r.hostRouteUsesDevAndGateway(ctx, ip, dev, gw.String())
 }
 
 func (r *Runner) NetRouteUsesDev(ctx context.Context, cidr string, dev string) (bool, error) {
-	return r.netRouteUsesDev(ctx, cidr, dev)
+	gw, err := r.bestGatewayForDev(ctx, dev)
+	if err != nil {
+		return false, err
+	}
+	return r.netRouteUsesDevAndGateway(ctx, cidr, dev, gw.String())
+}
+
+func (r *Runner) bestGatewayForDev(ctx context.Context, dev string) (net.IP, error) {
+	// For utun (point-to-point) interfaces, routes often need an explicit next-hop gateway
+	// (the peer IP) rather than an "interface-only" route. We infer the peer gateway by
+	// scanning the current IPv4 routing table and picking the most common IPv4 gateway
+	// used by routes on this interface.
+	cctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(cctx, netstatPath, "-rn", "-f", "inet")
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := cmd.Run()
+	out := buf.String()
+	if err != nil {
+		return nil, fmt.Errorf("netstat failed (for gateway discovery): %w (out=%q)", err, out)
+	}
+
+	lines := strings.Split(out, "\n")
+	netifIdx := -1
+	gwIdx := -1
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Destination") {
+			fields := strings.Fields(line)
+			for i, f := range fields {
+				switch f {
+				case "Gateway":
+					gwIdx = i
+				case "Netif":
+					netifIdx = i
+				}
+			}
+			break
+		}
+	}
+	if netifIdx == -1 || gwIdx == -1 {
+		return nil, fmt.Errorf("could not find Gateway/Netif columns in netstat output")
+	}
+
+	counts := map[string]int{}
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Routing tables") || strings.HasPrefix(line, "Internet:") || strings.HasPrefix(line, "Destination") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) <= netifIdx || len(fields) <= gwIdx {
+			continue
+		}
+		if fields[netifIdx] != dev {
+			continue
+		}
+
+		gw := fields[gwIdx]
+		// netstat uses these forms that aren't usable as a next-hop IP
+		if gw == "" || strings.HasPrefix(gw, "link#") || gw == "0.0.0.0" {
+			continue
+		}
+		ip := net.ParseIP(gw)
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		counts[ip.String()]++
+	}
+
+	var bestIP string
+	bestCount := 0
+	for ip, c := range counts {
+		if c > bestCount {
+			bestCount = c
+			bestIP = ip
+		}
+	}
+	if bestIP == "" {
+		return nil, fmt.Errorf("could not infer gateway for %s from netstat; ensure the VPN has at least one IPv4 route via a peer gateway", dev)
+	}
+	return net.ParseIP(bestIP).To4(), nil
 }
 
 // ListDestinationsByDev lists destinations from the IPv4 routing table whose Netif matches dev.
@@ -256,6 +370,17 @@ func parseInterface(out string) string {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "interface:") {
 			return strings.TrimSpace(strings.TrimPrefix(line, "interface:"))
+		}
+	}
+	return ""
+}
+
+func parseGateway(out string) string {
+	// `route -n get ...` output contains a line like: "gateway: 172.27.254.113"
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "gateway:") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "gateway:"))
 		}
 	}
 	return ""
