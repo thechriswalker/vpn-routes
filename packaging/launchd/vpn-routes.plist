@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>net.thechriswalker.vpn-routes</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <!-- Update this path to where you install the built binary -->
+      <string>/Users/chris/bin/vpn-routes</string>
+
+      <!-- Example flags -->
+      <!-- Prefer --config for complex setups: -->
+      <!-- <string>--config</string> -->
+      <!-- <string>/path/to/config.json</string> -->
+
+      <string>--dev</string>
+      <string>utun4</string>
+
+      <string>--hosts</string>
+      <string>api.dev.example.com,api.stage.example.com</string>
+
+      <string>--freq</string>
+      <string>30s</string>
+
+      <!-- Optional: logging verbosity -->
+      <!-- <string>--log-level</string> -->
+      <!-- <string>debug</string> -->
+
+      <!-- Optional: dry-run mode (log only, no route changes) -->
+      <!-- <string>--dry-run</string> -->
+
+      <!-- Optional: override state path -->
+      <!-- <string>--state-path</string> -->
+      <!-- <string>/var/db/vpn-routes/state.json</string> -->
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Route changes require root -->
+    <key>UserName</key>
+    <string>root</string>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/vpn-routes.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/vpn-routes.err.log</string>
+  </dict>
+</plist>
+
