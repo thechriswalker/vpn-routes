@@ -21,10 +21,10 @@ type Config struct {
 	Show      bool
 }
 
-const defaultFrequency = 30 * time.Second
 
-// Default for root-run local agent.
-const defaultStatePath = "~/.config/vpn-routes/state.json"
+const defaultFrequency = 10 * time.Minute
+
+const defaultStatePath = "./_state.json"
 
 func Parse(args []string) (Config, error) {
 	cfg := Config{

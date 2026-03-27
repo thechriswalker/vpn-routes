@@ -66,43 +66,121 @@ sudo ./vpn-routes --config ./config.json --log-level debug
 
 ## launchd (LaunchAgent)
 
-This is designed to run under `launchd` as a **LaunchAgent**, but route changes require elevated privileges, we need to add `sudo` privileges
-for the `/sbin/route` command.
+This is designed to run under `launchd` as a **LaunchAgent**. Route changes require elevated privileges, but you don’t have to grant your normal user blanket passwordless `sudo /sbin/route`.
 
-### Configure passwordless sudo for route (recommended)
+Instead, the recommended setup is:
+- run the daemon as your normal GUI user (LaunchAgent)
+- have launchd execute the daemon via `sudo -u _vpn_route ...` (a dedicated service user)
+- allow `_vpn_route` (and only `_vpn_route`) to run `/sbin/route` as root without a password
+
+### Recommended filesystem layout (`/opt/vpn-routes`)
+
+Create a stable install root:
+
+```bash
+sudo mkdir -p /opt/vpn-routes/{bin,logs,state}
+sudo chown -R root:wheel /opt/vpn-routes
+sudo chmod 0755 /opt/vpn-routes /opt/vpn-routes/bin
+sudo chmod 0755 /opt/vpn-routes/logs /opt/vpn-routes/state
+```
+
+Place files:
+- **binary**: `/opt/vpn-routes/bin/vpn-routes`
+- **config**: `/opt/vpn-routes/config.json`
+- **state**: `/opt/vpn-routes/state/state.json` (set via `statePath` in config, or `--state-path`)
+- **logs**: `/opt/vpn-routes/logs/stdout.log` and `/opt/vpn-routes/logs/stderr.log` (from the plist)
+
+Build and install:
+
+```bash
+go build -o vpn-routes .
+sudo install -m 0755 vpn-routes /opt/vpn-routes/bin/vpn-routes
+```
+
+Example config (note `statePath`):
+
+```json
+{
+  "dev": "utun4",
+  "hosts": ["api.dev.example.com", "10.20.30.40", "10.0.0.0/24"],
+  "freq": "30s",
+  "statePath": "/opt/vpn-routes/state/state.json",
+  "dryRun": false,
+  "logLevel": "info"
+}
+```
+
+Write it to:
+
+```bash
+sudo tee /opt/vpn-routes/config.json >/dev/null <<'EOF'
+{
+  "dev": "utun4",
+  "hosts": ["api.dev.example.com", "10.20.30.40", "10.0.0.0/24"],
+  "freq": "30s",
+  "statePath": "/opt/vpn-routes/state/state.json",
+  "dryRun": false,
+  "logLevel": "info"
+}
+EOF
+sudo chmod 0644 /opt/vpn-routes/config.json
+```
+
+### Create the service user (`_vpn_route`)
+
+Create a dedicated local account with no login shell. Pick an unused UID/GID (example uses `413`).
+
+```bash
+sudo dscl . -create /Groups/_vpn_route
+sudo dscl . -create /Groups/_vpn_route PrimaryGroupID 413
+
+sudo dscl . -create /Users/_vpn_route
+sudo dscl . -create /Users/_vpn_route RealName "vpn-routes service user"
+sudo dscl . -create /Users/_vpn_route UniqueID 413
+sudo dscl . -create /Users/_vpn_route PrimaryGroupID 413
+sudo dscl . -create /Users/_vpn_route NFSHomeDirectory /var/empty
+sudo dscl . -create /Users/_vpn_route UserShell /usr/bin/false
+sudo dscl . -passwd /Users/_vpn_route '*'
+```
+
+Give `_vpn_route` access to state/log folders:
+
+```bash
+sudo chown -R _vpn_route:_vpn_route /opt/vpn-routes/logs /opt/vpn-routes/state
+sudo chmod 0755 /opt/vpn-routes/logs /opt/vpn-routes/state
+```
+
+### Configure `sudoers` (two-step, narrow scope)
+
 Create a sudoers drop-in (edit with `visudo` so you don't break sudo):
 
 ```bash
 sudo visudo -f /etc/sudoers.d/vpn-routes
 ```
 
-Add a line (replace `YOUR_USERNAME`):
+Add these lines (replace `YOUR_USERNAME`):
 
 ```text
-YOUR_USERNAME ALL=(root) NOPASSWD: /sbin/route
+YOUR_USERNAME ALL=(_vpn_route) NOPASSWD: /opt/vpn-routes/bin/vpn-routes
+_vpn_route ALL=(root) NOPASSWD: /sbin/route
 ```
 
-If you use `--show` and see permissions issues reading routes, also allow:
+Optional (only if you use `--show` and see permissions issues reading routes):
 
 ```text
-YOUR_USERNAME ALL=(root) NOPASSWD: /usr/sbin/netstat
+_vpn_route ALL=(root) NOPASSWD: /usr/sbin/netstat
 ```
 
-1) Build and install the binary somewhere stable:
+### Install the plist
 
-```bash
-go build -o ~/bin/vpn-routes main.go
-```
-
-2) Copy and edit the plist:
+1) Copy and edit the plist:
 - Start from: `packaging/launchd/vpn-routes.plist`
-- Update:
-  - binary path
-  - `--dev`
-  - `--hosts`
-  - `--freq`
+- Confirm:
+  - `WorkingDirectory` is `/opt/vpn-routes`
+  - it runs `/usr/bin/sudo -u _vpn_route ./bin/vpn-routes --config ./config.json`
+  - log paths are under `/opt/vpn-routes/logs/`
 
-Then install it as a LaunchAgent:
+2) Install it as a LaunchAgent:
 
 ```bash
 sudo cp packaging/launchd/vpn-routes.plist /Library/LaunchAgents/net.thechriswalker.vpn-routes.plist
@@ -134,8 +212,8 @@ sudo rm /Library/LaunchAgents/net.thechriswalker.vpn-routes.plist
 ```
 
 Logs (as configured in the plist):
-- `/tmp/vpn-routes.out.log`
-- `/tmp/vpn-routes.err.log`
+- `/opt/vpn-routes/logs/stdout.log`
+- `/opt/vpn-routes/logs/stderr.log`
 
 ## Manual verification checklist
 - With VPN connected and `--dev` present:
